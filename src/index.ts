@@ -77,48 +77,86 @@ async function run(): Promise<void> {
       throw wrapPermissionError(err, 'statuses:write', 'createCommitStatus');
     }
 
-    const inProgressBody =
-      `${COMMENT_MARKER}\n🤖 **Jules is reviewing this PR.** Results will appear here shortly (typically 2–5 minutes).`;
-
-    let createdId: number;
+    // Search for existing review comment with session ID
+    let existingSessionId: string | undefined;
     try {
-      const created = await octokit.rest.issues.createComment({
+      const comments = await octokit.rest.issues.listComments({
+        owner, repo, issue_number: prNumber,
+      });
+      const existingComment = comments.data.find(c => c.body?.includes(COMMENT_MARKER));
+      if (existingComment) {
+        commentId = existingComment.id;
+        if (existingComment.body) {
+          const match = existingComment.body.match(/_Session:\s*`([^`]+)`_/);
+          if (match) existingSessionId = match[1];
+        }
+      }
+    } catch (err) {
+      core.warning(`Failed to search existing PR comments: ${String(err)}`);
+    }
+
+    const inProgressBody =
+      `${COMMENT_MARKER}\n🤖 **Jules is reviewing ${existingSessionId ? 'the updated commit in' : ''} this PR.** Results will appear here shortly (typically 2–5 minutes).`;
+
+    if (commentId) {
+      await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: inProgressBody });
+    } else {
+      let created = await octokit.rest.issues.createComment({
         owner, repo, issue_number: prNumber, body: inProgressBody,
       });
-      createdId = created.data.id;
-    } catch (err) {
-      throw wrapPermissionError(err, 'pull-requests:write', 'createComment');
+      commentId = created.data.id;
     }
-    commentId = createdId;
-
-    let rulesFromFile: string | undefined;
-    if (rulesFilePath) {
-      rulesFromFile = await loadRulesFromBase(octokit, owner, repo, rulesFilePath, baseSha);
-    }
-
-    const prompt = buildReviewPrompt({
-      repoFullName: `${owner}/${repo}`,
-      prNumber,
-      prTitle: pr.title || '',
-      prBody: pr.body || '',
-      baseBranch: pr.base.ref,
-      headBranch: pr.head.ref,
-      extraInstructions: extraInstructions || undefined,
-      rulesFromFile,
-    });
 
     const customJules = jules.with({ apiKey });
+    let session: any;
 
-    core.info('Creating Jules review session…');
-    const session = await customJules.session({
-      prompt,
-      source: { github: `${owner}/${repo}`, baseBranch: pr.base.ref },
-      requireApproval: false,
-      autoPr: false,
-    });
-    core.info(`Jules session: ${session.id}`);
+    if (existingSessionId) {
+      core.info(`Resuming existing Jules session: ${existingSessionId}`);
+      session = customJules.session(existingSessionId);
+      
+      let diffText = '';
+      try {
+        const rawDiff = await fetchDiff(octokit, owner, repo, pr);
+        diffText = truncateDiff(rawDiff, 40_000).text;
+      } catch (e) {
+        core.info('Could not fetch incremental diff, continuing with branch reference.');
+      }
 
-    await waitUntilSessionReady(session);
+      const updatePrompt = `A new commit has been pushed to PR #${prNumber} on branch \`${pr.head.ref}\` (Commit: \`${headSha.slice(0, 7)}\`).
+${diffText ? `\nNew/Updated Diff Snippet:\n\`\`\`diff\n${diffText}\n\`\`\`\n` : ''}
+Please review the new commit and update your review and verdict accordingly. Remember to end your response with:
+VERDICT: approve (or comment or block)`;
+
+      core.info('Sending update prompt to existing session...');
+      await session.send(updatePrompt);
+    } else {
+      let rulesFromFile: string | undefined;
+      if (rulesFilePath) {
+        rulesFromFile = await loadRulesFromBase(octokit, owner, repo, rulesFilePath, baseSha);
+      }
+
+      const prompt = buildReviewPrompt({
+        repoFullName: `${owner}/${repo}`,
+        prNumber,
+        prTitle: pr.title || '',
+        prBody: pr.body || '',
+        baseBranch: pr.base.ref,
+        headBranch: pr.head.ref,
+        extraInstructions: extraInstructions || undefined,
+        rulesFromFile,
+      });
+
+      core.info('Creating new Jules review session…');
+      session = await customJules.session({
+        prompt,
+        source: { github: `${owner}/${repo}`, baseBranch: pr.base.ref },
+        requireApproval: false,
+        autoPr: false,
+      });
+      core.info(`New Jules session: ${session.id}`);
+
+      await waitUntilSessionReady(session);
+    }
 
     const reviewMessage = await pollForReview(session as any, timeoutMinutes * 60 * 1000);
     core.info(`Collected review (${reviewMessage.length} chars)`);
@@ -178,10 +216,7 @@ async function fetchDiff(
   });
   const data = compare.data as unknown;
   if (typeof data !== 'string') {
-    throw new Error(
-      'GitHub returned no diff text (PR may be too large or comparison refused). ' +
-      'Action cannot review this PR.',
-    );
+    throw new Error('GitHub returned no diff text.');
   }
   return data;
 }
@@ -226,9 +261,6 @@ async function markCommentFailed(
   await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body });
 }
 
-// Match proper HTTP status codes only. `msg.includes('401')` would false-positive on
-// any error message that happens to contain the digits 401/403 as a substring — e.g.
-// a Jules session ID like `2076358440166838858` contains `401` at positions 10–12.
 function isAuthError(msg: string): boolean {
   return /\b(?:401|403)\b/.test(msg);
 }
@@ -305,7 +337,7 @@ function truncateDiff(diff: string, maxChars: number): { text: string; truncated
   const text = diff.slice(0, maxChars);
   return {
     text,
-    truncatedNote: `The diff was truncated: original ${diff.length} chars, kept first ${maxChars}. Some changes are not visible in the diff above; your review of the visible portion should state this caveat.`,
+    truncatedNote: `The diff was truncated: original ${diff.length} chars, kept first ${maxChars}.`,
   };
 }
 
