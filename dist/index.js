@@ -40829,6 +40829,26 @@ VERDICT: approve (or comment or block)`;
             return;
         }
         const verdict = parseVerdict(reviewMessage);
+        // Parse and post line-level inline comments if present in the review output
+        const inlineComments = parseInlineComments(reviewMessage);
+        if (inlineComments.length > 0) {
+            info(`Found ${inlineComments.length} inline line-level finding(s). Posting to PR...`);
+            try {
+                await octokit.rest.pulls.createReview({
+                    owner, repo, pull_number: prNumber,
+                    commit_id: headSha,
+                    event: 'COMMENT',
+                    comments: inlineComments.map(c => ({
+                        path: c.path,
+                        line: c.line,
+                        body: `🤖 **Jules Finding**: ${c.body}`
+                    }))
+                });
+            }
+            catch (err) {
+                warning(`Could not post line-level review comments: ${String(err)}`);
+            }
+        }
         const finalBody = `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${reviewMessage}\n\n---\n_Session: \`${session.id}\`_`;
         await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody });
         const { state, description } = statusFromVerdict(verdict, failOn);
@@ -40845,6 +40865,20 @@ VERDICT: approve (or comment or block)`;
             .catch(() => { });
         setFailed(`Jules PR review failed: ${msg}`);
     }
+}
+function parseInlineComments(reviewMessage) {
+    const comments = [];
+    const regex = /-\s*\*\*`([^`]+)`,\s*lines?\s*(\d+)(?:-\d+)?\*\*\s*:\s*(.+)/gi;
+    let match;
+    while ((match = regex.exec(reviewMessage)) !== null) {
+        const filePath = match[1].trim();
+        const lineNum = parseInt(match[2], 10);
+        const text = match[3].trim();
+        if (filePath && !isNaN(lineNum) && text) {
+            comments.push({ path: filePath, line: lineNum, body: text });
+        }
+    }
+    return comments;
 }
 async function fetchDiff(octokit, owner, repo, pr) {
     try {

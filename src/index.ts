@@ -6,6 +6,12 @@ import { buildReviewPrompt } from './prompt.js';
 type FailOn = 'never' | 'blocking' | 'any';
 type Verdict = 'approve' | 'comment' | 'block';
 
+interface InlineComment {
+  path: string;
+  line: number;
+  body: string;
+}
+
 const COMMENT_MARKER = '<!-- jules-pr-reviewer -->';
 const VALID_FAIL_ON: FailOn[] = ['never', 'blocking', 'any'];
 
@@ -189,6 +195,26 @@ VERDICT: approve (or comment or block)`;
 
     const verdict = parseVerdict(reviewMessage);
 
+    // Parse and post line-level inline comments if present in the review output
+    const inlineComments = parseInlineComments(reviewMessage);
+    if (inlineComments.length > 0) {
+      core.info(`Found ${inlineComments.length} inline line-level finding(s). Posting to PR...`);
+      try {
+        await octokit.rest.pulls.createReview({
+          owner, repo, pull_number: prNumber,
+          commit_id: headSha,
+          event: 'COMMENT',
+          comments: inlineComments.map(c => ({
+            path: c.path,
+            line: c.line,
+            body: `🤖 **Jules Finding**: ${c.body}`
+          }))
+        });
+      } catch (err) {
+        core.warning(`Could not post line-level review comments: ${String(err)}`);
+      }
+    }
+
     const finalBody =
       `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${reviewMessage}\n\n---\n_Session: \`${session.id}\`_`;
     await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody });
@@ -208,6 +234,21 @@ VERDICT: approve (or comment or block)`;
       .catch(() => {});
     core.setFailed(`Jules PR review failed: ${msg}`);
   }
+}
+
+function parseInlineComments(reviewMessage: string): InlineComment[] {
+  const comments: InlineComment[] = [];
+  const regex = /-\s*\*\*`([^`]+)`,\s*lines?\s*(\d+)(?:-\d+)?\*\*\s*:\s*(.+)/gi;
+  let match;
+  while ((match = regex.exec(reviewMessage)) !== null) {
+    const filePath = match[1].trim();
+    const lineNum = parseInt(match[2], 10);
+    const text = match[3].trim();
+    if (filePath && !isNaN(lineNum) && text) {
+      comments.push({ path: filePath, line: lineNum, body: text });
+    }
+  }
+  return comments;
 }
 
 async function fetchDiff(
