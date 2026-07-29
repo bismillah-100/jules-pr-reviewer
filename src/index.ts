@@ -91,14 +91,10 @@ async function run(): Promise<void> {
     }
     commentId = createdId;
 
-    const diff = await fetchDiff(octokit, owner, repo, pr);
-
     let rulesFromFile: string | undefined;
     if (rulesFilePath) {
       rulesFromFile = await loadRulesFromBase(octokit, owner, repo, rulesFilePath, baseSha);
     }
-
-    const { text: diffText, truncatedNote } = truncateDiff(diff, 80_000);
 
     const prompt = buildReviewPrompt({
       repoFullName: `${owner}/${repo}`,
@@ -107,8 +103,6 @@ async function run(): Promise<void> {
       prBody: pr.body || '',
       baseBranch: pr.base.ref,
       headBranch: pr.head.ref,
-      diff: diffText,
-      diffTruncatedNote: truncatedNote,
       extraInstructions: extraInstructions || undefined,
       rulesFromFile,
     });
