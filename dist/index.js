@@ -40760,9 +40760,24 @@ async function run() {
         }
         const customJules = jules.with({ apiKey });
         let session;
+        let expectedMinMessages = 1;
         if (existingSessionId) {
             info(`Resuming existing Jules session: ${existingSessionId}`);
             session = customJules.session(existingSessionId);
+            // Count existing agentMessaged count before sending update
+            try {
+                await session.hydrate();
+                let existingMsgCount = 0;
+                for await (const a of session.history()) {
+                    if (a.type === 'agentMessaged')
+                        existingMsgCount++;
+                }
+                expectedMinMessages = existingMsgCount + 1;
+                info(`Existing agentMessaged count: ${existingMsgCount}. Waiting for message #${expectedMinMessages}.`);
+            }
+            catch (e) {
+                info(`Could not count existing history messages: ${String(e)}`);
+            }
             let diffText = '';
             try {
                 const rawDiff = await fetchDiff(octokit, owner, repo, pr);
@@ -40803,7 +40818,7 @@ VERDICT: approve (or comment or block)`;
             info(`New Jules session: ${session.id}`);
             await waitUntilSessionReady(session);
         }
-        const reviewMessage = await pollForReview(session, timeoutMinutes * 60 * 1000);
+        const reviewMessage = await pollForReview(session, timeoutMinutes * 60 * 1000, expectedMinMessages);
         info(`Collected review (${reviewMessage.length} chars)`);
         if (!reviewMessage) {
             await markCommentFailed(octokit, owner, repo, commentId, `Jules did not return a review within ${timeoutMinutes} minutes. Session: \`${session.id}\`. ` +
@@ -40894,23 +40909,24 @@ function wrapPermissionError(err, needed, op) {
     }
     return err instanceof Error ? err : new Error(msg);
 }
-async function pollForReview(session, timeoutMs) {
+async function pollForReview(session, timeoutMs, expectedMinMessages = 1) {
     const deadline = Date.now() + timeoutMs;
     let attempt = 0;
     while (Date.now() < deadline) {
         attempt++;
         try {
             await session.hydrate();
-            let last = '';
+            const messages = [];
             for await (const a of session.history()) {
                 if (a.type === 'agentMessaged')
-                    last = a.message;
+                    messages.push(a.message);
             }
-            if (last) {
-                info(`Got agentMessaged on attempt ${attempt}.`);
+            if (messages.length >= expectedMinMessages) {
+                const last = messages[messages.length - 1];
+                info(`Got new agentMessaged (${messages.length}/${expectedMinMessages}) on attempt ${attempt}.`);
                 return last;
             }
-            info(`No agentMessaged yet (attempt ${attempt})…`);
+            info(`Waiting for new agentMessaged (have ${messages.length}, need ${expectedMinMessages}) (attempt ${attempt})…`);
         }
         catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -40919,7 +40935,7 @@ async function pollForReview(session, timeoutMs) {
             }
             info(`hydrate/history error (attempt ${attempt}): ${msg}`);
         }
-        await new Promise(r => setTimeout(r, 20_000));
+        await new Promise(r => setTimeout(r, 10_000));
     }
     return '';
 }

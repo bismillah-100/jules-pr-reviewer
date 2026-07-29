@@ -109,10 +109,24 @@ async function run(): Promise<void> {
 
     const customJules = jules.with({ apiKey });
     let session: any;
+    let expectedMinMessages = 1;
 
     if (existingSessionId) {
       core.info(`Resuming existing Jules session: ${existingSessionId}`);
       session = customJules.session(existingSessionId);
+
+      // Count existing agentMessaged count before sending update
+      try {
+        await session.hydrate();
+        let existingMsgCount = 0;
+        for await (const a of session.history()) {
+          if (a.type === 'agentMessaged') existingMsgCount++;
+        }
+        expectedMinMessages = existingMsgCount + 1;
+        core.info(`Existing agentMessaged count: ${existingMsgCount}. Waiting for message #${expectedMinMessages}.`);
+      } catch (e) {
+        core.info(`Could not count existing history messages: ${String(e)}`);
+      }
       
       let diffText = '';
       try {
@@ -158,7 +172,7 @@ VERDICT: approve (or comment or block)`;
       await waitUntilSessionReady(session);
     }
 
-    const reviewMessage = await pollForReview(session as any, timeoutMinutes * 60 * 1000);
+    const reviewMessage = await pollForReview(session as any, timeoutMinutes * 60 * 1000, expectedMinMessages);
     core.info(`Collected review (${reviewMessage.length} chars)`);
 
     if (!reviewMessage) {
@@ -280,6 +294,7 @@ function wrapPermissionError(err: unknown, needed: string, op: string): Error {
 async function pollForReview(
   session: { id: string; hydrate: () => Promise<number>; history: () => AsyncIterable<any> },
   timeoutMs: number,
+  expectedMinMessages: number = 1,
 ): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
@@ -287,15 +302,16 @@ async function pollForReview(
     attempt++;
     try {
       await session.hydrate();
-      let last = '';
+      const messages: string[] = [];
       for await (const a of session.history()) {
-        if (a.type === 'agentMessaged') last = a.message;
+        if (a.type === 'agentMessaged') messages.push(a.message);
       }
-      if (last) {
-        core.info(`Got agentMessaged on attempt ${attempt}.`);
+      if (messages.length >= expectedMinMessages) {
+        const last = messages[messages.length - 1];
+        core.info(`Got new agentMessaged (${messages.length}/${expectedMinMessages}) on attempt ${attempt}.`);
         return last;
       }
-      core.info(`No agentMessaged yet (attempt ${attempt})…`);
+      core.info(`Waiting for new agentMessaged (have ${messages.length}, need ${expectedMinMessages}) (attempt ${attempt})…`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (isAuthError(msg)) {
@@ -303,7 +319,7 @@ async function pollForReview(
       }
       core.info(`hydrate/history error (attempt ${attempt}): ${msg}`);
     }
-    await new Promise(r => setTimeout(r, 20_000));
+    await new Promise(r => setTimeout(r, 10_000));
   }
   return '';
 }
