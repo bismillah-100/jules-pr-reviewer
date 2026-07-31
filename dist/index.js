@@ -40737,7 +40737,7 @@ async function run() {
             });
             const existingComment = comments.data.find(c => c.body?.includes(COMMENT_MARKER));
             if (existingComment) {
-                commentId = existingComment.id;
+                // commentId = existingComment.id; // Diubah: selalu buat komentar baru
                 if (existingComment.body) {
                     const match = existingComment.body.match(/_Session:\s*`([^`]+)`_/);
                     if (match)
