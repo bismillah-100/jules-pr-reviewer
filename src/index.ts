@@ -399,16 +399,19 @@ async function pollForReview(
     attempt++;
     try {
       await session.hydrate();
-      const messages: string[] = [];
+      let messageCount = 0;
+      let lastMessage = '';
       for await (const a of session.history()) {
-        if (a.type === 'agentMessaged') messages.push(a.message);
+        if (a.type === 'agentMessaged') {
+          messageCount++;
+          lastMessage = a.message;
+        }
       }
-      if (messages.length >= expectedMinMessages) {
-        const last = messages[messages.length - 1];
-        core.info(`Got new agentMessaged (${messages.length}/${expectedMinMessages}) on attempt ${attempt}.`);
-        return last;
+      if (messageCount >= expectedMinMessages) {
+        core.info(`Got new agentMessaged (${messageCount}/${expectedMinMessages}) on attempt ${attempt}.`);
+        return lastMessage;
       }
-      core.info(`Waiting for new agentMessaged (have ${messages.length}, need ${expectedMinMessages}) (attempt ${attempt})…`);
+      core.info(`Waiting for new agentMessaged (have ${messageCount}, need ${expectedMinMessages}) (attempt ${attempt})…`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (isAuthError(msg)) {
