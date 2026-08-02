@@ -87,7 +87,7 @@ async function run(): Promise<void> {
     // React to PR with 'eyes' emoji to indicate review in progress
     eyesReactionId = await addReaction(octokit, owner, repo, prNumber, 'eyes');
 
-    // Search for existing review comment with session ID if present
+    // Search for existing review comment or PR review with session ID if present
     let existingSessionId: string | undefined;
     try {
       const comments = await octokit.rest.issues.listComments({
@@ -99,8 +99,19 @@ async function run(): Promise<void> {
         const match = existingComment.body.match(/_Session:\s*`([^`]+)`_/);
         if (match) existingSessionId = match[1];
       }
+
+      if (!existingSessionId) {
+        const reviews = await octokit.rest.pulls.listReviews({
+          owner, repo, pull_number: prNumber,
+        });
+        const existingReview = [...reviews.data].reverse().find(r => r.body?.includes(COMMENT_MARKER));
+        if (existingReview && existingReview.body) {
+          const match = existingReview.body.match(/_Session:\s*`([^`]+)`_/);
+          if (match) existingSessionId = match[1];
+        }
+      }
     } catch (err) {
-      core.warning(`Failed to search existing PR comments: ${String(err)}`);
+      core.warning(`Failed to search existing PR comments/reviews: ${String(err)}`);
     }
 
     const customJules = jules.with({ apiKey });
@@ -187,6 +198,7 @@ VERDICT: approve (or comment or block)`;
           owner, repo, pull_number: prNumber,
           commit_id: headSha,
           event: 'COMMENT',
+          body: `${COMMENT_MARKER}\n🤖 **Jules Review**\n\n---\n_Session: \`${session.id}\`_`,
           comments: inlineComments.map(c => ({
             path: c.path,
             line: c.line,
@@ -209,18 +221,20 @@ VERDICT: approve (or comment or block)`;
       await addReaction(octokit, owner, repo, prNumber, '+1');
     }
 
-    // Always update existing comment or create a minimal one to preserve _Session: `id`_ for future commits
-    const cleanBody = verdict === 'approve'
-      ? '👍 **PR Approved** (No blocking or warning issues found).'
-      : (postedInline ? stripFindingsSection(reviewMessage) : reviewMessage);
-    const finalBody =
-      `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${cleanBody}\n\n---\n_Session: \`${session.id}\`_`;
+    // Only post top-level comment if NO inline findings were posted
+    if (!postedInline) {
+      const cleanBody = verdict === 'approve'
+        ? '👍 **PR Approved** (No blocking or warning issues found).'
+        : stripFindingsSection(reviewMessage);
+      const finalBody =
+        `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${cleanBody}\n\n---\n_Session: \`${session.id}\`_`;
 
-    if (commentId) {
-      await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody });
-    } else {
-      let created = await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: finalBody });
-      commentId = created.data.id;
+      if (commentId) {
+        await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody });
+      } else {
+        let created = await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: finalBody });
+        commentId = created.data.id;
+      }
     }
 
     const { state, description } = statusFromVerdict(verdict, failOn);
