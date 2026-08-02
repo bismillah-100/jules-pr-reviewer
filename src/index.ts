@@ -32,8 +32,8 @@ async function run(): Promise<void> {
   const statusContext = core.getInput('status_context');
   const extraInstructions = core.getInput('extra_instructions');
   const rulesFilePath = core.getInput('rules_file');
-  const timeoutMinutesRaw = core.getInput('timeout_minutes') || '30';
-  const timeoutMinutes = Math.max(1, parseInt(timeoutMinutesRaw, 10) || 30);
+  const timeoutMinutesRaw = core.getInput('timeout_minutes') || '60';
+  const timeoutMinutes = Math.max(1, parseInt(timeoutMinutesRaw, 10) || 60);
 
   const ctx = github.context;
   if (ctx.eventName === 'pull_request_target') {

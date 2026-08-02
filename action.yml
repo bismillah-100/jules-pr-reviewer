@@ -42,9 +42,9 @@ inputs:
     required: false
     default: '.github/jules-review-rules.md'
   timeout_minutes:
-    description: 'How long to wait for Jules to return a review before giving up. Default 30. Real reviews on non-trivial PRs often take 15-25 minutes; do not set below 20 or you will miss legitimate reviews.'
+    description: 'How long to wait for Jules to return a review before giving up. Default 60. Real reviews on non-trivial PRs often take 15-25 minutes; do not set below 20 or you will miss legitimate reviews.'
     required: false
-    default: '30'
+    default: '60'
 
 runs:
   using: 'node20'
