@@ -40741,6 +40741,7 @@ async function run() {
             });
             const existingComment = comments.data.find(c => c.body?.includes(COMMENT_MARKER));
             if (existingComment && existingComment.body) {
+                commentId = existingComment.id;
                 const match = existingComment.body.match(/_Session:\s*`([^`]+)`_/);
                 if (match)
                     existingSessionId = match[1];
@@ -40843,11 +40844,17 @@ VERDICT: approve (or comment or block)`;
             // Add thumbsup reaction on clean approval
             await addReaction(octokit, owner, repo, prNumber, '+1');
         }
+        // Always update existing comment or create a minimal one to preserve _Session: `id`_ for future commits
+        const cleanBody = verdict === 'approve'
+            ? '👍 **PR Approved** (No blocking or warning issues found).'
+            : (postedInline ? stripFindingsSection(reviewMessage) : reviewMessage);
+        const finalBody = `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${cleanBody}\n\n---\n_Session: \`${session.id}\`_`;
+        if (commentId) {
+            await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody });
+        }
         else {
-            // Post main review comment (only strip findings if they were posted inline successfully)
-            const bodyToPost = postedInline ? stripFindingsSection(reviewMessage) : reviewMessage;
-            const finalBody = `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${bodyToPost}\n\n---\n_Session: \`${session.id}\`_`;
-            await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: finalBody });
+            let created = await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: finalBody });
+            commentId = created.data.id;
         }
         const { state, description } = statusFromVerdict(verdict, failOn);
         await setStatus(octokit, owner, repo, headSha, statusContext, state, description);
