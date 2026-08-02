@@ -40950,17 +40950,19 @@ async function pollForReview(session, timeoutMs, expectedMinMessages = 1) {
         attempt++;
         try {
             await session.hydrate();
-            const messages = [];
+            let messageCount = 0;
+            let lastMessage = '';
             for await (const a of session.history()) {
-                if (a.type === 'agentMessaged')
-                    messages.push(a.message);
+                if (a.type === 'agentMessaged') {
+                    messageCount++;
+                    lastMessage = a.message;
+                }
             }
-            if (messages.length >= expectedMinMessages) {
-                const last = messages[messages.length - 1];
-                info(`Got new agentMessaged (${messages.length}/${expectedMinMessages}) on attempt ${attempt}.`);
-                return last;
+            if (messageCount >= expectedMinMessages) {
+                info(`Got new agentMessaged (${messageCount}/${expectedMinMessages}) on attempt ${attempt}.`);
+                return lastMessage;
             }
-            info(`Waiting for new agentMessaged (have ${messages.length}, need ${expectedMinMessages}) (attempt ${attempt})…`);
+            info(`Waiting for new agentMessaged (have ${messageCount}, need ${expectedMinMessages}) (attempt ${attempt})…`);
         }
         catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
