@@ -224,9 +224,7 @@ VERDICT: approve (or comment or block)`;
 
     // Only post top-level comment if NO inline findings were posted
     if (!postedInline) {
-      const cleanBody = verdict === 'approve'
-        ? '👍 **PR Approved** (No blocking or warning issues found).'
-        : stripFindingsSection(reviewMessage);
+      const cleanBody = stripFindingsSection(reviewMessage);
       const finalBody =
         `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${cleanBody}\n\n---\n_Session: \`${session.id}\`_`;
 
