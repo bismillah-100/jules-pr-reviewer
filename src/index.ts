@@ -123,17 +123,8 @@ async function run(): Promise<void> {
         core.info(`Could not count existing history messages: ${String(e)}`);
       }
       
-      let diffText = '';
-      try {
-        const rawDiff = await fetchDiff(octokit, owner, repo, pr);
-        diffText = truncateDiff(rawDiff, 40_000).text;
-      } catch (e) {
-        core.info('Could not fetch incremental diff, continuing with branch reference.');
-      }
-
       const updatePrompt = `A new commit has been pushed to PR #${prNumber} on branch \`${pr.head.ref}\` (Commit: \`${headSha.slice(0, 7)}\`).
-${diffText ? `\nNew/Updated Diff Snippet:\n\`\`\`diff\n${diffText}\n\`\`\`\n` : ''}
-Please review the new commit and update your review and verdict accordingly. Remember to end your response with:
+Please review the updated commit/changes on branch \`${pr.head.ref}\` and update your review and verdict accordingly. Remember to end your response with:
 VERDICT: approve (or comment or block)`;
 
       core.info('Sending update prompt to existing session...');

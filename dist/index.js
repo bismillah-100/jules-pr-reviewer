@@ -40682,8 +40682,8 @@ async function run() {
     const statusContext = getInput('status_context');
     const extraInstructions = getInput('extra_instructions');
     const rulesFilePath = getInput('rules_file');
-    const timeoutMinutesRaw = getInput('timeout_minutes') || '30';
-    const timeoutMinutes = Math.max(1, parseInt(timeoutMinutesRaw, 10) || 30);
+    const timeoutMinutesRaw = getInput('timeout_minutes') || '60';
+    const timeoutMinutes = Math.max(1, parseInt(timeoutMinutesRaw, 10) || 60);
     const ctx = github_context;
     if (ctx.eventName === 'pull_request_target') {
         setFailed('pull_request_target is not supported — it runs with base-repo write tokens and exposes the action to prompt-injection via attacker-controlled diffs. Use on: pull_request instead.');
