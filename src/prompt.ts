@@ -49,7 +49,7 @@ One short paragraph stating what the PR does and your overall take.
 
 ## Findings
 Group by severity heading (### [BLOCKING], ### [WARN], ### [NIT]).
-CRITICAL: Every finding MUST specify the exact file path and line number using the exact format:
+CRITICAL: Every finding MUST start with a bullet point specifying the exact file path and line number using the format:
 - **\`path/to/file.ext\`, line N**: [SEVERITY] issue description, why it matters, and recommended fix.
 
 ## Verdict

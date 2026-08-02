@@ -40648,7 +40648,7 @@ One short paragraph stating what the PR does and your overall take.
 
 ## Findings
 Group by severity heading (### [BLOCKING], ### [WARN], ### [NIT]).
-CRITICAL: Every finding MUST specify the exact file path and line number using the exact format:
+CRITICAL: Every finding MUST start with a bullet point specifying the exact file path and line number using the format:
 - **\`path/to/file.ext\`, line N**: [SEVERITY] issue description, why it matters, and recommended fix.
 
 ## Verdict
@@ -40769,17 +40769,8 @@ async function run() {
             catch (e) {
                 info(`Could not count existing history messages: ${String(e)}`);
             }
-            let diffText = '';
-            try {
-                const rawDiff = await fetchDiff(octokit, owner, repo, pr);
-                diffText = truncateDiff(rawDiff, 40_000).text;
-            }
-            catch (e) {
-                info('Could not fetch incremental diff, continuing with branch reference.');
-            }
             const updatePrompt = `A new commit has been pushed to PR #${prNumber} on branch \`${pr.head.ref}\` (Commit: \`${headSha.slice(0, 7)}\`).
-${diffText ? `\nNew/Updated Diff Snippet:\n\`\`\`diff\n${diffText}\n\`\`\`\n` : ''}
-Please review the new commit and update your review and verdict accordingly. Remember to end your response with:
+Please review the updated commit/changes on branch \`${pr.head.ref}\` and update your review and verdict accordingly. Remember to end your response with:
 VERDICT: approve (or comment or block)`;
             info('Sending update prompt to existing session...');
             await session.send(updatePrompt);
@@ -40823,6 +40814,7 @@ VERDICT: approve (or comment or block)`;
         }
         const verdict = parseVerdict(reviewMessage);
         // Parse and post line-level inline comments if present in the review output
+        let postedInline = false;
         const inlineComments = parseInlineComments(reviewMessage);
         if (inlineComments.length > 0) {
             info(`Found ${inlineComments.length} inline line-level finding(s). Posting to PR...`);
@@ -40837,6 +40829,7 @@ VERDICT: approve (or comment or block)`;
                         body: `🤖 **Jules Finding**: ${c.body}`
                     }))
                 });
+                postedInline = true;
             }
             catch (err) {
                 warning(`Could not post line-level review comments: ${String(err)}`);
@@ -40851,9 +40844,9 @@ VERDICT: approve (or comment or block)`;
             await addReaction(octokit, owner, repo, prNumber, '+1');
         }
         else {
-            // Post main review comment stripped of findings section to avoid noise
-            const cleanBody = stripFindingsSection(reviewMessage);
-            const finalBody = `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${cleanBody}\n\n---\n_Session: \`${session.id}\`_`;
+            // Post main review comment (only strip findings if they were posted inline successfully)
+            const bodyToPost = postedInline ? stripFindingsSection(reviewMessage) : reviewMessage;
+            const finalBody = `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${bodyToPost}\n\n---\n_Session: \`${session.id}\`_`;
             await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: finalBody });
         }
         const { state, description } = statusFromVerdict(verdict, failOn);
@@ -40874,7 +40867,7 @@ VERDICT: approve (or comment or block)`;
 }
 function parseInlineComments(reviewMessage) {
     const comments = [];
-    const regex = /-\s*\*\*`([^`]+)`,\s*lines?\s*(\d+)(?:-\d+)?\*\*\s*:\s*(.+)/gi;
+    const regex = /(?:^|\n)(?:-\s*)?(?:\*\*)?`?([a-zA-Z0-9_\-\/.\\]+\.[a-zA-Z0-9]+)`?(?:\*\*)?(?:,\s*lines?\s*|:)\s*(\d+)(?:-\d+)?(?:\*\*)?\s*:\s*(.+)/gi;
     let match;
     while ((match = regex.exec(reviewMessage)) !== null) {
         const filePath = match[1].trim();
@@ -40896,7 +40889,7 @@ async function fetchDiff(octokit, owner, repo, pr) {
             return data;
     }
     catch (err) {
-        warning(`pulls.get diff failed, falling back to compare: ${String(err)}`);
+        core.warning(`pulls.get diff failed, falling back to compare: ${String(err)}`);
     }
     const compare = await octokit.rest.repos.compareCommitsWithBasehead({
         owner, repo,

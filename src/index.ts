@@ -177,6 +177,7 @@ VERDICT: approve (or comment or block)`;
     const verdict = parseVerdict(reviewMessage);
 
     // Parse and post line-level inline comments if present in the review output
+    let postedInline = false;
     const inlineComments = parseInlineComments(reviewMessage);
     if (inlineComments.length > 0) {
       core.info(`Found ${inlineComments.length} inline line-level finding(s). Posting to PR...`);
@@ -191,6 +192,7 @@ VERDICT: approve (or comment or block)`;
             body: `🤖 **Jules Finding**: ${c.body}`
           }))
         });
+        postedInline = true;
       } catch (err) {
         core.warning(`Could not post line-level review comments: ${String(err)}`);
       }
@@ -205,10 +207,10 @@ VERDICT: approve (or comment or block)`;
       // Add thumbsup reaction on clean approval
       await addReaction(octokit, owner, repo, prNumber, '+1');
     } else {
-      // Post main review comment stripped of findings section to avoid noise
-      const cleanBody = stripFindingsSection(reviewMessage);
+      // Post main review comment (only strip findings if they were posted inline successfully)
+      const bodyToPost = postedInline ? stripFindingsSection(reviewMessage) : reviewMessage;
       const finalBody =
-        `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${cleanBody}\n\n---\n_Session: \`${session.id}\`_`;
+        `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${bodyToPost}\n\n---\n_Session: \`${session.id}\`_`;
       await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: finalBody });
     }
 
@@ -232,7 +234,7 @@ VERDICT: approve (or comment or block)`;
 
 function parseInlineComments(reviewMessage: string): InlineComment[] {
   const comments: InlineComment[] = [];
-  const regex = /-\s*\*\*`([^`]+)`,\s*lines?\s*(\d+)(?:-\d+)?\*\*\s*:\s*(.+)/gi;
+  const regex = /(?:^|\n)(?:-\s*)?(?:\*\*)?`?([a-zA-Z0-9_\-\/.\\]+\.[a-zA-Z0-9]+)`?(?:\*\*)?(?:,\s*lines?\s*|:)\s*(\d+)(?:-\d+)?(?:\*\*)?\s*:\s*(.+)/gi;
   let match;
   while ((match = regex.exec(reviewMessage)) !== null) {
     const filePath = match[1].trim();
