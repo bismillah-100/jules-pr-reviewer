@@ -72,6 +72,7 @@ async function run(): Promise<void> {
   }
 
   let commentId: number | undefined;
+  let eyesReactionId: number | undefined;
 
   try {
     try {
@@ -83,34 +84,22 @@ async function run(): Promise<void> {
       throw wrapPermissionError(err, 'statuses:write', 'createCommitStatus');
     }
 
-    // Search for existing review comment with session ID
+    // React to PR with 'eyes' emoji to indicate review in progress
+    eyesReactionId = await addReaction(octokit, owner, repo, prNumber, 'eyes');
+
+    // Search for existing review comment with session ID if present
     let existingSessionId: string | undefined;
     try {
       const comments = await octokit.rest.issues.listComments({
         owner, repo, issue_number: prNumber,
       });
       const existingComment = comments.data.find(c => c.body?.includes(COMMENT_MARKER));
-      if (existingComment) {
-        // commentId = existingComment.id; // Diubah: selalu buat komentar baru
-        if (existingComment.body) {
-          const match = existingComment.body.match(/_Session:\s*`([^`]+)`_/);
-          if (match) existingSessionId = match[1];
-        }
+      if (existingComment && existingComment.body) {
+        const match = existingComment.body.match(/_Session:\s*`([^`]+)`_/);
+        if (match) existingSessionId = match[1];
       }
     } catch (err) {
       core.warning(`Failed to search existing PR comments: ${String(err)}`);
-    }
-
-    const inProgressBody =
-      `${COMMENT_MARKER}\n🤖 **Jules is reviewing ${existingSessionId ? 'the updated commit in' : ''} this PR.** Results will appear here shortly (typically 2–5 minutes).`;
-
-    if (commentId) {
-      await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: inProgressBody });
-    } else {
-      let created = await octokit.rest.issues.createComment({
-        owner, repo, issue_number: prNumber, body: inProgressBody,
-      });
-      commentId = created.data.id;
     }
 
     const customJules = jules.with({ apiKey });
@@ -182,8 +171,9 @@ VERDICT: approve (or comment or block)`;
     core.info(`Collected review (${reviewMessage.length} chars)`);
 
     if (!reviewMessage) {
+      if (eyesReactionId) await deleteReaction(octokit, owner, repo, prNumber, eyesReactionId);
       await markCommentFailed(
-        octokit, owner, repo, commentId,
+        octokit, owner, repo, prNumber, commentId,
         `Jules did not return a review within ${timeoutMinutes} minutes. Session: \`${session.id}\`. ` +
         `The session may still be running on Jules' side — check https://jules.google.com/session/${session.id}. ` +
         `Consider raising the action's \`timeout_minutes\` input or re-running the workflow.`,
@@ -215,9 +205,21 @@ VERDICT: approve (or comment or block)`;
       }
     }
 
-    const finalBody =
-      `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${reviewMessage}\n\n---\n_Session: \`${session.id}\`_`;
-    await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody });
+    // Remove the initial 'eyes' reaction
+    if (eyesReactionId) {
+      await deleteReaction(octokit, owner, repo, prNumber, eyesReactionId);
+    }
+
+    if (verdict === 'approve') {
+      // Add thumbsup reaction on clean approval
+      await addReaction(octokit, owner, repo, prNumber, '+1');
+    } else {
+      // Post main review comment stripped of findings section to avoid noise
+      const cleanBody = stripFindingsSection(reviewMessage);
+      const finalBody =
+        `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${cleanBody}\n\n---\n_Session: \`${session.id}\`_`;
+      await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: finalBody });
+    }
 
     const { state, description } = statusFromVerdict(verdict, failOn);
     await setStatus(octokit, owner, repo, headSha, statusContext, state, description);
@@ -227,9 +229,10 @@ VERDICT: approve (or comment or block)`;
     const msg = err instanceof Error ? err.message : String(err);
     core.error(`Review failed: ${msg}`);
 
-    if (commentId !== undefined) {
-      await markCommentFailed(octokit, owner, repo, commentId, msg).catch(() => {});
+    if (eyesReactionId) {
+      await deleteReaction(octokit, owner, repo, prNumber, eyesReactionId).catch(() => {});
     }
+    await markCommentFailed(octokit, owner, repo, prNumber, commentId, msg).catch(() => {});
     await setStatus(octokit, owner, repo, headSha, statusContext, 'error', truncate(msg, 140))
       .catch(() => {});
     core.setFailed(`Jules PR review failed: ${msg}`);
@@ -308,12 +311,48 @@ async function setStatus(
   });
 }
 
+async function addReaction(
+  octokit: ReturnType<typeof github.getOctokit>,
+  owner: string, repo: string, issueNumber: number, content: 'eyes' | '+1' | '-1' | 'laugh' | 'confused' | 'heart' | 'hooray' | 'rocket'
+): Promise<number | undefined> {
+  try {
+    const res = await octokit.rest.reactions.createForIssue({
+      owner, repo, issue_number: issueNumber, content,
+    });
+    return res.data.id;
+  } catch (err) {
+    core.warning(`Failed to add '${content}' reaction: ${String(err)}`);
+    return undefined;
+  }
+}
+
+async function deleteReaction(
+  octokit: ReturnType<typeof github.getOctokit>,
+  owner: string, repo: string, issueNumber: number, reactionId: number
+): Promise<void> {
+  try {
+    await octokit.rest.reactions.deleteForIssue({
+      owner, repo, issue_number: issueNumber, reaction_id: reactionId,
+    });
+  } catch (err) {
+    core.warning(`Failed to delete reaction ${reactionId}: ${String(err)}`);
+  }
+}
+
+function stripFindingsSection(message: string): string {
+  return message.replace(/##\s*Findings[\s\S]*?(?=\n##\s+|$)/i, '').trim();
+}
+
 async function markCommentFailed(
   octokit: ReturnType<typeof github.getOctokit>,
-  owner: string, repo: string, commentId: number, reason: string,
+  owner: string, repo: string, issueNumber: number, commentId: number | undefined, reason: string,
 ): Promise<void> {
   const body = `${COMMENT_MARKER}\n⚠️ **Jules PR review failed to complete.**\n\n\`\`\`\n${truncate(reason, 500)}\n\`\`\`\n\nSee the [workflow logs](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}) for details.`;
-  await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body });
+  if (commentId) {
+    await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body });
+  } else {
+    await octokit.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body });
+  }
 }
 
 function isAuthError(msg: string): boolean {

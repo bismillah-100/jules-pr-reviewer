@@ -48,8 +48,9 @@ One short paragraph stating what the PR does and your overall take.
 1-3 bullets on what's well done.
 
 ## Findings
-Group by severity heading (### [BLOCKING], ### [WARN], ### [NIT]). For each finding:
-- **\`path/to/file.ext\`, line N**: issue, why it matters, how to fix.
+Group by severity heading (### [BLOCKING], ### [WARN], ### [NIT]).
+CRITICAL: Every finding MUST specify the exact file path and line number using the exact format:
+- **\`path/to/file.ext\`, line N**: [SEVERITY] issue description, why it matters, and recommended fix.
 
 ## Verdict
 End with EXACTLY one line:

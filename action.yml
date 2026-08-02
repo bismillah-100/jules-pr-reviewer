@@ -14,9 +14,9 @@ inputs:
     description: 'GitHub token with pull-requests:write and statuses:write. Usually the default GITHUB_TOKEN secret.'
     required: true
   fail_on:
-    description: 'When to fail the commit status check: never | blocking | any. Default blocking.'
+    description: 'When to fail the commit status check: never | blocking | any. Default never.'
     required: false
-    default: 'blocking'
+    default: 'never'
   skip_drafts:
     description: 'Skip review on draft PRs.'
     required: false
