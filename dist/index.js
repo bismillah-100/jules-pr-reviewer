@@ -40876,11 +40876,12 @@ VERDICT: approve (or comment or block)`;
     catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         error(`Review failed: ${msg}`);
+        const safeErrorMsg = "An internal error occurred during the review process. Please check the action logs for details.";
         if (eyesReactionId) {
             await deleteReaction(octokit, owner, repo, prNumber, eyesReactionId).catch(() => { });
         }
-        await markCommentFailed(octokit, owner, repo, prNumber, commentId, msg).catch(() => { });
-        await setStatus(octokit, owner, repo, headSha, statusContext, 'error', truncate(msg, 140))
+        await markCommentFailed(octokit, owner, repo, prNumber, commentId, safeErrorMsg).catch(() => { });
+        await setStatus(octokit, owner, repo, headSha, statusContext, 'error', truncate(safeErrorMsg, 140))
             .catch(() => { });
         setFailed(`Jules PR review failed: ${msg}`);
     }
