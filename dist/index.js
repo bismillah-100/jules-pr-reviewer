@@ -40831,28 +40831,28 @@ VERDICT: approve (or comment or block)`;
         const verdict = parseVerdict(reviewMessage);
         // Parse and post line-level inline comments if present in the review output
         const inlineComments = parseInlineComments(reviewMessage);
+        const finalBody = `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${reviewMessage}\n\n---\n_Session: \`${session.id}\`_`;
+        const { state, description } = statusFromVerdict(verdict, failOn);
+        const promises = [
+            octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody }),
+            setStatus(octokit, owner, repo, headSha, statusContext, state, description),
+        ];
         if (inlineComments.length > 0) {
             info(`Found ${inlineComments.length} inline line-level finding(s). Posting to PR...`);
-            try {
-                await octokit.rest.pulls.createReview({
-                    owner, repo, pull_number: prNumber,
-                    commit_id: headSha,
-                    event: 'COMMENT',
-                    comments: inlineComments.map(c => ({
-                        path: c.path,
-                        line: c.line,
-                        body: `🤖 **Jules Finding**: ${c.body}`
-                    }))
-                });
-            }
-            catch (err) {
+            promises.push(octokit.rest.pulls.createReview({
+                owner, repo, pull_number: prNumber,
+                commit_id: headSha,
+                event: 'COMMENT',
+                comments: inlineComments.map(c => ({
+                    path: c.path,
+                    line: c.line,
+                    body: `🤖 **Jules Finding**: ${c.body}`
+                }))
+            }).catch(err => {
                 warning(`Could not post line-level review comments: ${String(err)}`);
-            }
+            }));
         }
-        const finalBody = `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${reviewMessage}\n\n---\n_Session: \`${session.id}\`_`;
-        await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody });
-        const { state, description } = statusFromVerdict(verdict, failOn);
-        await setStatus(octokit, owner, repo, headSha, statusContext, state, description);
+        await Promise.all(promises);
         info(`Verdict: ${verdict}. Status check: ${state}.`);
     }
     catch (err) {

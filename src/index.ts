@@ -197,10 +197,20 @@ VERDICT: approve (or comment or block)`;
 
     // Parse and post line-level inline comments if present in the review output
     const inlineComments = parseInlineComments(reviewMessage);
+
+    const finalBody =
+      `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${reviewMessage}\n\n---\n_Session: \`${session.id}\`_`;
+    const { state, description } = statusFromVerdict(verdict, failOn);
+
+    const promises: Promise<unknown>[] = [
+      octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody }),
+      setStatus(octokit, owner, repo, headSha, statusContext, state, description),
+    ];
+
     if (inlineComments.length > 0) {
       core.info(`Found ${inlineComments.length} inline line-level finding(s). Posting to PR...`);
-      try {
-        await octokit.rest.pulls.createReview({
+      promises.push(
+        octokit.rest.pulls.createReview({
           owner, repo, pull_number: prNumber,
           commit_id: headSha,
           event: 'COMMENT',
@@ -209,18 +219,13 @@ VERDICT: approve (or comment or block)`;
             line: c.line,
             body: `🤖 **Jules Finding**: ${c.body}`
           }))
-        });
-      } catch (err) {
-        core.warning(`Could not post line-level review comments: ${String(err)}`);
-      }
+        }).catch(err => {
+          core.warning(`Could not post line-level review comments: ${String(err)}`);
+        })
+      );
     }
 
-    const finalBody =
-      `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${reviewMessage}\n\n---\n_Session: \`${session.id}\`_`;
-    await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody });
-
-    const { state, description } = statusFromVerdict(verdict, failOn);
-    await setStatus(octokit, owner, repo, headSha, statusContext, state, description);
+    await Promise.all(promises);
 
     core.info(`Verdict: ${verdict}. Status check: ${state}.`);
   } catch (err) {

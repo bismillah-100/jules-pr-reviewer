@@ -1,0 +1,3 @@
+## 2024-05-16 - Parallelizing GitHub API Calls
+**Learning:** Sequential calls to the GitHub API (via Octokit) can add significant delay to GitHub Action runs. When updating PR comments, setting commit statuses, and posting reviews, these operations are often independent and do not rely on each other's response.
+**Action:** Always look for independent `octokit` operations at the end of an action's execution path and combine them using `Promise.all()`. Ensure that you preserve individual error handling (e.g., using `.catch()` on specific promises) if the original code intentionally swallowed errors for non-critical operations.
