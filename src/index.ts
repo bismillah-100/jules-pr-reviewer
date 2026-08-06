@@ -20,6 +20,7 @@ async function run(): Promise<void> {
   core.setSecret(apiKey);
 
   const token = core.getInput('github_token', { required: true });
+  core.setSecret(token);
   const failOnRaw = core.getInput('fail_on');
   if (!VALID_FAIL_ON.includes(failOnRaw as FailOn)) {
     core.setFailed(`Invalid fail_on: "${failOnRaw}". Must be one of: ${VALID_FAIL_ON.join(', ')}.`);
@@ -93,7 +94,7 @@ async function run(): Promise<void> {
       if (existingComment) {
         // commentId = existingComment.id; // Diubah: selalu buat komentar baru
         if (existingComment.body) {
-          const match = existingComment.body.match(/_Session:\s*`([^`]+)`_/);
+          const match = existingComment.body.match(/_Session:\s*`([a-zA-Z0-9-]+)`_/);
           if (match) existingSessionId = match[1];
         }
       }
@@ -224,7 +225,8 @@ VERDICT: approve (or comment or block)`;
 
     core.info(`Verdict: ${verdict}. Status check: ${state}.`);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    let msg = err instanceof Error ? err.message : String(err);
+    msg = msg.replaceAll(apiKey, '***').replaceAll(token, '***');
     core.error(`Review failed: ${msg}`);
 
     if (commentId !== undefined) {
