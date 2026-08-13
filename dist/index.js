@@ -40634,7 +40634,7 @@ ${extraInstructions}
 ` : ''}
 
 # Task
-Please inspect the commits and changes between \`${headBranch}\` and \`${baseBranch}\` for PR #${prNumber} directly in the repository and evaluate for:
+Please inspect the Pull Request diff for PR #${prNumber} directly. If you use git commands to view the diff, you MUST use the three-dot syntax (e.g., \`git diff origin/${baseBranch}...origin/${headBranch}\`) or rely on the GitHub PR files API. Do NOT use a two-dot diff or compare branch tips directly, as this will incorrectly make you think the PR is deleting recent changes from the base branch.
 - Correctness, Security, Reliability, Maintainability, and Tests.
 
 # Output format (STRICT)
@@ -40650,6 +40650,7 @@ One short paragraph stating what the PR does and your overall take.
 Group by severity heading (### [BLOCKING], ### [WARN], ### [NIT]).
 CRITICAL: Every finding MUST start with a bullet point specifying the exact file path and line number using the format:
 - **\`path/to/file.ext\`, line N**: [SEVERITY] issue description, why it matters, and recommended fix.
+CRITICAL: Ensure the line number exactly matches the line in the feature branch (right side of the diff). Do not guess line numbers. Look at the hunk header \`@@\` and carefully count down.
 
 ## Verdict
 End with EXACTLY one line:
