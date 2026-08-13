@@ -40657,6 +40657,8 @@ End with EXACTLY one line:
 \`VERDICT: approve\` — no blocking issues.
 \`VERDICT: comment\` — has warnings/nits but nothing blocking.
 \`VERDICT: block\` — one or more BLOCKING issues.
+
+CRITICAL: Do NOT output any conversational text, thinking process, or extra notes before or after the requested markdown format. Output strictly the requested headings and content.
 `;
 }
 
