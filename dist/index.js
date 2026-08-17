@@ -40760,9 +40760,7 @@ async function run() {
                 const shaMatch = existingComment.body.match(/\(Commit:\s*`([a-f0-9]+)`\)/i);
                 if (shaMatch)
                     lastReviewedSha = shaMatch[1];
-                if (existingComment.body.includes('## 🤖 Jules Review') ||
-                    existingComment.body.includes('Review complete!') ||
-                    existingComment.body.includes('🤖 **Jules Review**')) {
+                if (isReviewBodyComplete(existingComment.body)) {
                     isAlreadyCompleted = true;
                 }
             }
@@ -40778,9 +40776,7 @@ async function run() {
                     const shaMatch = existingReview.body.match(/\(Commit:\s*`([a-f0-9]+)`\)/i);
                     if (shaMatch)
                         lastReviewedSha = shaMatch[1];
-                    if (existingReview.body.includes('## 🤖 Jules Review') ||
-                        existingReview.body.includes('Review complete!') ||
-                        existingReview.body.includes('🤖 **Jules Review**')) {
+                    if (isReviewBodyComplete(existingReview.body)) {
                         isAlreadyCompleted = true;
                     }
                 }
@@ -40834,9 +40830,7 @@ async function run() {
 Please review the updated commit/changes on branch \`${pr.head.ref}\` and update your review and verdict accordingly. Remember to end your response with:
 VERDICT: approve (or comment or block)`;
                 info('Sending update prompt to existing session...');
-                await withRetry(async () => {
-                    await session.send(updatePrompt);
-                }, 3, 5000);
+                await session.send(updatePrompt);
                 // Update placeholder comment for the new commit
                 const placeholderBody = `${COMMENT_MARKER}\n⏳ **Jules is reviewing this PR...** (Commit: \`${shortSha}\`)\n\n---\n_Session: \`${session.id}\`_`;
                 if (commentId) {
@@ -40864,14 +40858,12 @@ VERDICT: approve (or comment or block)`;
                 rulesFromFile,
             });
             info('Creating new Jules review session…');
-            session = await withRetry(async () => {
-                return await customJules.session({
-                    prompt,
-                    source: { github: `${owner}/${repo}`, baseBranch: pr.base.ref },
-                    requireApproval: false,
-                    autoPr: false,
-                });
-            }, 3, 5000);
+            session = await customJules.session({
+                prompt,
+                source: { github: `${owner}/${repo}`, baseBranch: pr.base.ref },
+                requireApproval: false,
+                autoPr: false,
+            });
             info(`New Jules session: ${session.id}`);
             // Save placeholder comment with session ID immediately so re-run can resume if we timeout
             const placeholderBody = `${COMMENT_MARKER}\n⏳ **Jules is reviewing this PR...** (Commit: \`${shortSha}\`)\n\n---\n_Session: \`${session.id}\`_`;
@@ -41090,6 +41082,16 @@ function wrapPermissionError(err, needed, op) {
     }
     return err instanceof Error ? err : new Error(msg);
 }
+function isReviewBodyComplete(body) {
+    if (body.includes('✅ **Review complete! See inline comments.**'))
+        return true;
+    if (body.includes('## 🤖 Jules Review') && hasFinalVerdict(body))
+        return true;
+    return false;
+}
+function hasFinalVerdict(message) {
+    return /VERDICT:\s*(approve|comment|block)/i.test(message) || /\[BLOCKING\]/i.test(message);
+}
 async function pollForReview(session, timeoutMs, expectedMinMessages = 1) {
     const deadline = Date.now() + timeoutMs;
     let attempt = 0;
@@ -41099,17 +41101,21 @@ async function pollForReview(session, timeoutMs, expectedMinMessages = 1) {
             await session.hydrate();
             let messageCount = 0;
             let lastMessage = '';
+            let lastVerdictMessage = '';
             for await (const a of session.history()) {
                 if (a.type === 'agentMessaged') {
                     messageCount++;
-                    lastMessage = a.message;
+                    lastMessage = a.message || '';
+                    if (hasFinalVerdict(lastMessage)) {
+                        lastVerdictMessage = lastMessage;
+                    }
                 }
             }
-            if (messageCount >= expectedMinMessages) {
-                info(`Got new agentMessaged (${messageCount}/${expectedMinMessages}) on attempt ${attempt}.`);
-                return lastMessage;
+            if (lastVerdictMessage && messageCount >= expectedMinMessages) {
+                info(`Got final review with verdict (${messageCount}/${expectedMinMessages}) on attempt ${attempt}.`);
+                return lastVerdictMessage;
             }
-            info(`Waiting for new agentMessaged (have ${messageCount}, need ${expectedMinMessages}) (attempt ${attempt})…`);
+            info(`Waiting for final review with VERDICT (have ${messageCount}, need ${expectedMinMessages}, hasVerdict: ${Boolean(lastVerdictMessage)}) (attempt ${attempt})…`);
         }
         catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -41145,23 +41151,6 @@ async function waitUntilSessionReady(session) {
         }
     }
     throw new Error('Session did not become ready within timeout.');
-}
-async function withRetry(fn, maxRetries, delayMs) {
-    let attempt = 0;
-    while (true) {
-        attempt++;
-        try {
-            return await fn();
-        }
-        catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            if (attempt >= maxRetries || isAuthError(msg)) {
-                throw err;
-            }
-            warning(`Attempt ${attempt}/${maxRetries} failed: ${msg}. Retrying in ${delayMs}ms...`);
-            await new Promise(r => setTimeout(r, delayMs));
-        }
-    }
 }
 function truncateDiff(diff, maxChars) {
     if (diff.length <= maxChars)

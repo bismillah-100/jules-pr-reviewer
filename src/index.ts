@@ -107,9 +107,7 @@ async function run(): Promise<void> {
         const shaMatch = existingComment.body.match(/\(Commit:\s*`([a-f0-9]+)`\)/i);
         if (shaMatch) lastReviewedSha = shaMatch[1];
 
-        if (existingComment.body.includes('## 🤖 Jules Review') ||
-            existingComment.body.includes('Review complete!') ||
-            existingComment.body.includes('🤖 **Jules Review**')) {
+        if (isReviewBodyComplete(existingComment.body)) {
           isAlreadyCompleted = true;
         }
       }
@@ -126,9 +124,7 @@ async function run(): Promise<void> {
           const shaMatch = existingReview.body.match(/\(Commit:\s*`([a-f0-9]+)`\)/i);
           if (shaMatch) lastReviewedSha = shaMatch[1];
 
-          if (existingReview.body.includes('## 🤖 Jules Review') ||
-              existingReview.body.includes('Review complete!') ||
-              existingReview.body.includes('🤖 **Jules Review**')) {
+          if (isReviewBodyComplete(existingReview.body)) {
             isAlreadyCompleted = true;
           }
         }
@@ -476,6 +472,16 @@ function wrapPermissionError(err: unknown, needed: string, op: string): Error {
   return err instanceof Error ? err : new Error(msg);
 }
 
+function isReviewBodyComplete(body: string): boolean {
+  if (body.includes('✅ **Review complete! See inline comments.**')) return true;
+  if (body.includes('## 🤖 Jules Review') && hasFinalVerdict(body)) return true;
+  return false;
+}
+
+function hasFinalVerdict(message: string): boolean {
+  return /VERDICT:\s*(approve|comment|block)/i.test(message) || /\[BLOCKING\]/i.test(message);
+}
+
 async function pollForReview(
   session: { id: string; hydrate: () => Promise<number>; history: () => AsyncIterable<any> },
   timeoutMs: number,
@@ -489,17 +495,25 @@ async function pollForReview(
       await session.hydrate();
       let messageCount = 0;
       let lastMessage = '';
+      let lastVerdictMessage = '';
       for await (const a of session.history()) {
         if (a.type === 'agentMessaged') {
           messageCount++;
-          lastMessage = a.message;
+          lastMessage = a.message || '';
+          if (hasFinalVerdict(lastMessage)) {
+            lastVerdictMessage = lastMessage;
+          }
         }
       }
-      if (messageCount >= expectedMinMessages) {
-        core.info(`Got new agentMessaged (${messageCount}/${expectedMinMessages}) on attempt ${attempt}.`);
-        return lastMessage;
+      if (lastVerdictMessage && messageCount >= expectedMinMessages) {
+        core.info(`Got final review with verdict (${messageCount}/${expectedMinMessages}) on attempt ${attempt}.`);
+        return lastVerdictMessage;
       }
-      core.info(`Waiting for new agentMessaged (have ${messageCount}, need ${expectedMinMessages}) (attempt ${attempt})…`);
+      core.info(
+        `Waiting for final review with VERDICT (have ${messageCount}, need ${expectedMinMessages}, hasVerdict: ${Boolean(
+          lastVerdictMessage,
+        )}) (attempt ${attempt})…`,
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (isAuthError(msg)) {
