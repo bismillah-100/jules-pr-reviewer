@@ -90,6 +90,9 @@ async function run(): Promise<void> {
 
     // Search for existing review comment or PR review with session ID if present
     let existingSessionId: string | undefined;
+    let lastReviewedSha: string | undefined;
+    let isAlreadyCompleted = false;
+
     try {
       const comments = await octokit.rest.issues.listComments({
         owner, repo, issue_number: prNumber,
@@ -97,8 +100,18 @@ async function run(): Promise<void> {
       const existingComment = comments.data.find(c => c.body?.includes(COMMENT_MARKER));
       if (existingComment && existingComment.body) {
         commentId = existingComment.id;
-        const match = existingComment.body.match(/_Session:\s*`([^`]+)`_/);
-        if (match) existingSessionId = match[1];
+
+        const sessionMatch = existingComment.body.match(/_Session:\s*`([^`]+)`_/);
+        if (sessionMatch) existingSessionId = sessionMatch[1];
+
+        const shaMatch = existingComment.body.match(/\(Commit:\s*`([a-f0-9]+)`\)/i);
+        if (shaMatch) lastReviewedSha = shaMatch[1];
+
+        if (existingComment.body.includes('## 🤖 Jules Review') ||
+            existingComment.body.includes('Review complete!') ||
+            existingComment.body.includes('🤖 **Jules Review**')) {
+          isAlreadyCompleted = true;
+        }
       }
 
       if (!existingSessionId) {
@@ -107,8 +120,17 @@ async function run(): Promise<void> {
         });
         const existingReview = [...reviews.data].reverse().find(r => r.body?.includes(COMMENT_MARKER));
         if (existingReview && existingReview.body) {
-          const match = existingReview.body.match(/_Session:\s*`([^`]+)`_/);
-          if (match) existingSessionId = match[1];
+          const sessionMatch = existingReview.body.match(/_Session:\s*`([^`]+)`_/);
+          if (sessionMatch) existingSessionId = sessionMatch[1];
+
+          const shaMatch = existingReview.body.match(/\(Commit:\s*`([a-f0-9]+)`\)/i);
+          if (shaMatch) lastReviewedSha = shaMatch[1];
+
+          if (existingReview.body.includes('## 🤖 Jules Review') ||
+              existingReview.body.includes('Review complete!') ||
+              existingReview.body.includes('🤖 **Jules Review**')) {
+            isAlreadyCompleted = true;
+          }
         }
       }
     } catch (err) {
@@ -118,30 +140,58 @@ async function run(): Promise<void> {
     const customJules = jules.with({ apiKey });
     let session: any;
     let expectedMinMessages = 1;
+    const shortSha = headSha.slice(0, 7);
+    let skipReviewGeneration = false;
 
     if (existingSessionId) {
       core.info(`Resuming existing Jules session: ${existingSessionId}`);
       session = customJules.session(existingSessionId);
 
       // Count existing agentMessaged count before sending update
+      let existingMsgCount = 0;
+      let lastActivityType = '';
       try {
         await session.hydrate();
-        let existingMsgCount = 0;
         for await (const a of session.history()) {
+          lastActivityType = a.type;
           if (a.type === 'agentMessaged') existingMsgCount++;
         }
-        expectedMinMessages = existingMsgCount + 1;
-        core.info(`Existing agentMessaged count: ${existingMsgCount}. Waiting for message #${expectedMinMessages}.`);
       } catch (e) {
         core.info(`Could not count existing history messages: ${String(e)}`);
       }
-      
-      const updatePrompt = `A new commit has been pushed to PR #${prNumber} on branch \`${pr.head.ref}\` (Commit: \`${headSha.slice(0, 7)}\`).
+
+      if (lastReviewedSha === shortSha) {
+        if (isAlreadyCompleted) {
+          core.info(`Session already reviewed commit ${shortSha}. Skipping generation.`);
+          skipReviewGeneration = true;
+        } else {
+          core.info(`Resuming session on same commit ${shortSha}.`);
+          // If the last activity was userMessaged, Jules hasn't replied yet — wait for next response.
+          if (lastActivityType === 'userMessaged') {
+            expectedMinMessages = existingMsgCount + 1;
+          } else {
+            expectedMinMessages = Math.max(1, existingMsgCount);
+          }
+        }
+      } else {
+        expectedMinMessages = existingMsgCount + 1;
+        core.info(`Existing agentMessaged count: ${existingMsgCount}. Waiting for message #${expectedMinMessages}.`);
+        const updatePrompt = `A new commit has been pushed to PR #${prNumber} on branch \`${pr.head.ref}\` (Commit: \`${shortSha}\`).
 Please review the updated commit/changes on branch \`${pr.head.ref}\` and update your review and verdict accordingly. Remember to end your response with:
 VERDICT: approve (or comment or block)`;
 
-      core.info('Sending update prompt to existing session...');
-      await session.send(updatePrompt);
+        core.info('Sending update prompt to existing session...');
+        await session.send(updatePrompt);
+
+        // Update placeholder comment for the new commit
+        const placeholderBody = `${COMMENT_MARKER}\n⏳ **Jules is reviewing this PR...** (Commit: \`${shortSha}\`)\n\n---\n_Session: \`${session.id}\`_`;
+        if (commentId) {
+          await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: placeholderBody });
+        } else {
+          const created = await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: placeholderBody });
+          commentId = created.data.id;
+        }
+      }
     } else {
       let rulesFromFile: string | undefined;
       if (rulesFilePath) {
@@ -168,19 +218,32 @@ VERDICT: approve (or comment or block)`;
       });
       core.info(`New Jules session: ${session.id}`);
 
+      // Save placeholder comment with session ID immediately so re-run can resume if we timeout
+      const placeholderBody = `${COMMENT_MARKER}\n⏳ **Jules is reviewing this PR...** (Commit: \`${shortSha}\`)\n\n---\n_Session: \`${session.id}\`_`;
+      if (commentId) {
+        await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: placeholderBody });
+      } else {
+        const created = await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: placeholderBody });
+        commentId = created.data.id;
+      }
+
       await waitUntilSessionReady(session);
     }
 
-    const reviewMessage = await pollForReview(session as any, timeoutMinutes * 60 * 1000, expectedMinMessages);
-    core.info(`Collected review (${reviewMessage.length} chars)`);
+    let reviewMessage = '';
+    if (!skipReviewGeneration) {
+      reviewMessage = await pollForReview(session as any, timeoutMinutes * 60 * 1000, expectedMinMessages);
+      core.info(`Collected review (${reviewMessage.length} chars)`);
+    }
 
-    if (!reviewMessage) {
+    if (!reviewMessage && !skipReviewGeneration) {
       if (eyesReactionId) await deleteReaction(octokit, owner, repo, prNumber, eyesReactionId);
       await markCommentFailed(
         octokit, owner, repo, prNumber, commentId,
         `Jules did not return a review within ${timeoutMinutes} minutes. Session: \`${session.id}\`. ` +
         `The session may still be running on Jules' side — check https://jules.google.com/session/${session.id}. ` +
         `Consider raising the action's \`timeout_minutes\` input or re-running the workflow.`,
+        session, shortSha
       );
       await setStatus(octokit, owner, repo, headSha, statusContext, 'error', 'Jules did not return a review in time');
       core.setFailed(`Jules returned no review message within ${timeoutMinutes} minutes.`);
@@ -189,67 +252,82 @@ VERDICT: approve (or comment or block)`;
 
     const verdict = parseVerdict(reviewMessage);
 
-    // Parse and post line-level inline comments if present in the review output
-    let postedInline = false;
-    const inlineComments = parseInlineComments(reviewMessage);
-    if (inlineComments.length > 0) {
-      core.info(`Found ${inlineComments.length} inline line-level finding(s). Posting to PR...`);
-      try {
-        await octokit.rest.pulls.createReview({
-          owner, repo, pull_number: prNumber,
-          commit_id: headSha,
-          event: 'COMMENT',
-          body: `${COMMENT_MARKER}\n🤖 **Jules Review**\n\n---\n_Session: \`${session.id}\`_`,
-          comments: inlineComments.map(c => ({
-            path: c.path,
-            line: c.line,
-            body: `🤖 **Jules Finding**: ${c.body}`
-          }))
-        });
-        postedInline = true;
-      } catch (err) {
-        core.warning(`Could not post line-level review comments: ${String(err)}`);
+    // Only process comments if we actually generated a new review
+    if (!skipReviewGeneration) {
+      // Parse and post line-level inline comments if present in the review output
+      let postedInline = false;
+      const inlineComments = parseInlineComments(reviewMessage);
+      if (inlineComments.length > 0) {
+        core.info(`Found ${inlineComments.length} inline line-level finding(s). Posting to PR...`);
+        try {
+          await octokit.rest.pulls.createReview({
+            owner, repo, pull_number: prNumber,
+            commit_id: headSha,
+            event: 'COMMENT',
+            body: `${COMMENT_MARKER}\n🤖 **Jules Review** (Commit: \`${shortSha}\`)\n\n---\n_Session: \`${session.id}\`_`,
+            comments: inlineComments.map(c => ({
+              path: c.path,
+              line: c.line,
+              body: `🤖 **Jules Finding**: ${c.body}`
+            }))
+          });
+          postedInline = true;
+
+          // Update placeholder to indicate completion since inline comments were posted
+          if (commentId) {
+            const completedBody = `${COMMENT_MARKER}\n✅ **Review complete! See inline comments.** (Commit: \`${shortSha}\`)\n\n---\n_Session: \`${session.id}\`_`;
+            await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: completedBody });
+          }
+        } catch (err) {
+          core.warning(`Could not post line-level review comments: ${String(err)}`);
+        }
+      }
+
+      if (verdict === 'approve') {
+        // Add thumbsup reaction on clean approval
+        await addReaction(octokit, owner, repo, prNumber, '+1');
+      }
+
+      // Only post top-level comment if NO inline findings were posted
+      if (!postedInline) {
+        const cleanBody = stripFindingsSection(reviewMessage);
+        const finalBody =
+          `${COMMENT_MARKER}\n## 🤖 Jules Review (Commit: \`${shortSha}\`)\n\n${cleanBody}\n\n---\n_Session: \`${session.id}\`_`;
+
+        if (commentId) {
+          await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody });
+        } else {
+          let created = await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: finalBody });
+          commentId = created.data.id;
+        }
       }
     }
 
-    // Remove the initial 'eyes' reaction
+    // Always clean up eyes reaction and set final status (even when skipping)
     if (eyesReactionId) {
       await deleteReaction(octokit, owner, repo, prNumber, eyesReactionId);
     }
 
-    if (verdict === 'approve') {
-      // Add thumbsup reaction on clean approval
-      await addReaction(octokit, owner, repo, prNumber, '+1');
+    if (!skipReviewGeneration) {
+      const { state, description } = statusFromVerdict(verdict, failOn);
+      await setStatus(octokit, owner, repo, headSha, statusContext, state, description);
+      core.info(`Verdict: ${verdict}. Status check: ${state}.`);
+    } else {
+      // When skipping, resolve pending status to success — the review result is already in the existing comment
+      await setStatus(octokit, owner, repo, headSha, statusContext, 'success', 'Review already completed for this commit');
+      core.info(`Review already fully completed for commit ${shortSha}.`);
     }
-
-    // Only post top-level comment if NO inline findings were posted
-    if (!postedInline) {
-      const cleanBody = stripFindingsSection(reviewMessage);
-      const finalBody =
-        `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${cleanBody}\n\n---\n_Session: \`${session.id}\`_`;
-
-      if (commentId) {
-        await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody });
-      } else {
-        let created = await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: finalBody });
-        commentId = created.data.id;
-      }
-    }
-
-    const { state, description } = statusFromVerdict(verdict, failOn);
-    await setStatus(octokit, owner, repo, headSha, statusContext, state, description);
-
-    core.info(`Verdict: ${verdict}. Status check: ${state}.`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     core.error(`Review failed: ${msg}`);
 
     const safeErrorMsg = "An internal error occurred during the review process. Please check the action logs for details.";
+    const shortSha = headSha.slice(0, 7);
 
     if (eyesReactionId) {
       await deleteReaction(octokit, owner, repo, prNumber, eyesReactionId).catch(() => {});
     }
-    await markCommentFailed(octokit, owner, repo, prNumber, commentId, safeErrorMsg).catch(() => {});
+    await markCommentFailed(octokit, owner, repo, prNumber, commentId, safeErrorMsg, undefined, shortSha).catch(() => {});
     await setStatus(octokit, owner, repo, headSha, statusContext, 'error', truncate(safeErrorMsg, 140))
       .catch(() => {});
     core.setFailed(`Jules PR review failed: ${msg}`);
@@ -363,8 +441,18 @@ function stripFindingsSection(message: string): string {
 async function markCommentFailed(
   octokit: ReturnType<typeof github.getOctokit>,
   owner: string, repo: string, issueNumber: number, commentId: number | undefined, reason: string,
+  session?: { id: string }, shortSha?: string
 ): Promise<void> {
-  const body = `${COMMENT_MARKER}\n⚠️ **Jules PR review failed to complete.**\n\n\`\`\`\n${truncate(reason, 500)}\n\`\`\`\n\nSee the [workflow logs](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}) for details.`;
+  let body = `${COMMENT_MARKER}\n⚠️ **Jules PR review failed to complete.**`;
+  if (shortSha) {
+    body += ` (Commit: \`${shortSha}\`)`;
+  }
+  body += `\n\n\`\`\`\n${truncate(reason, 500)}\n\`\`\`\n\nSee the [workflow logs](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}) for details.`;
+
+  if (session?.id) {
+    body += `\n\n---\n_Session: \`${session.id}\`_`;
+  }
+
   if (commentId) {
     await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body });
   } else {
