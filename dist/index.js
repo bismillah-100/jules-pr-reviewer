@@ -40669,6 +40669,7 @@ async function run() {
     const apiKey = getInput('jules_api_key', { required: true });
     core_setSecret(apiKey);
     const token = getInput('github_token', { required: true });
+    core_setSecret(token);
     const failOnRaw = getInput('fail_on');
     if (!VALID_FAIL_ON.includes(failOnRaw)) {
         setFailed(`Invalid fail_on: "${failOnRaw}". Must be one of: ${VALID_FAIL_ON.join(', ')}.`);
@@ -40856,7 +40857,8 @@ VERDICT: approve (or comment or block)`;
         info(`Verdict: ${verdict}. Status check: ${state}.`);
     }
     catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        let msg = err instanceof Error ? err.message : String(err);
+        msg = msg.replaceAll(apiKey, '***').replaceAll(token, '***');
         error(`Review failed: ${msg}`);
         if (commentId !== undefined) {
             await markCommentFailed(octokit, owner, repo, commentId, msg).catch(() => { });
