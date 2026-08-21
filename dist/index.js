@@ -40821,10 +40821,12 @@ VERDICT: approve (or comment or block)`;
         const reviewMessage = await pollForReview(session, timeoutMinutes * 60 * 1000, expectedMinMessages);
         info(`Collected review (${reviewMessage.length} chars)`);
         if (!reviewMessage) {
-            await markCommentFailed(octokit, owner, repo, commentId, `Jules did not return a review within ${timeoutMinutes} minutes. Session: \`${session.id}\`. ` +
-                `The session may still be running on Jules' side — check https://jules.google.com/session/${session.id}. ` +
-                `Consider raising the action's \`timeout_minutes\` input or re-running the workflow.`);
-            await setStatus(octokit, owner, repo, headSha, statusContext, 'error', 'Jules did not return a review in time');
+            await Promise.all([
+                markCommentFailed(octokit, owner, repo, commentId, `Jules did not return a review within ${timeoutMinutes} minutes. Session: \`${session.id}\`. ` +
+                    `The session may still be running on Jules' side — check https://jules.google.com/session/${session.id}. ` +
+                    `Consider raising the action's \`timeout_minutes\` input or re-running the workflow.`),
+                setStatus(octokit, owner, repo, headSha, statusContext, 'error', 'Jules did not return a review in time')
+            ]);
             setFailed(`Jules returned no review message within ${timeoutMinutes} minutes.`);
             return;
         }
@@ -40850,19 +40852,22 @@ VERDICT: approve (or comment or block)`;
             }
         }
         const finalBody = `${COMMENT_MARKER}\n## 🤖 Jules Review\n\n${reviewMessage}\n\n---\n_Session: \`${session.id}\`_`;
-        await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody });
         const { state, description } = statusFromVerdict(verdict, failOn);
-        await setStatus(octokit, owner, repo, headSha, statusContext, state, description);
+        await Promise.all([
+            octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody }),
+            setStatus(octokit, owner, repo, headSha, statusContext, state, description)
+        ]);
         info(`Verdict: ${verdict}. Status check: ${state}.`);
     }
     catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         error(`Review failed: ${msg}`);
+        const promises = [];
         if (commentId !== undefined) {
-            await markCommentFailed(octokit, owner, repo, commentId, msg).catch(() => { });
+            promises.push(markCommentFailed(octokit, owner, repo, commentId, msg).catch(() => { }));
         }
-        await setStatus(octokit, owner, repo, headSha, statusContext, 'error', truncate(msg, 140))
-            .catch(() => { });
+        promises.push(setStatus(octokit, owner, repo, headSha, statusContext, 'error', truncate(msg, 140)).catch(() => { }));
+        await Promise.all(promises);
         setFailed(`Jules PR review failed: ${msg}`);
     }
 }
