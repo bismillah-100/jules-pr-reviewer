@@ -284,11 +284,10 @@ VERDICT: approve (or comment or block)`;
         await addReaction(octokit, owner, repo, prNumber, '+1');
       }
 
-      // Only post top-level comment if NO inline findings were posted
+      // Only post top-level comment if NO inline findings were posted (or if inline review failed)
       if (!postedInline) {
-        const cleanBody = stripFindingsSection(reviewMessage);
         const finalBody =
-          `${COMMENT_MARKER}\n## 🤖 Jules Review (Commit: \`${shortSha}\`)\n\n${cleanBody}\n\n---\n_Session: \`${session.id}\`_`;
+          `${COMMENT_MARKER}\n## 🤖 Jules Review (Commit: \`${shortSha}\`)\n\n${reviewMessage}\n\n---\n_Session: \`${session.id}\`_`;
 
         if (commentId) {
           await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody });
@@ -335,7 +334,7 @@ function parseInlineComments(reviewMessage: string): InlineComment[] {
   const regex = /(?:^|\n)(?:-\s*)?(?:\*\*)?`?([a-zA-Z0-9_\-\/.\\]+\.[a-zA-Z0-9]+)`?(?:\*\*)?(?:,\s*lines?\s*|:)\s*(\d+)(?:-\d+)?(?:\*\*)?\s*:\s*(.+)/gi;
   let match;
   while ((match = regex.exec(reviewMessage)) !== null) {
-    const filePath = match[1].trim();
+    const filePath = match[1].trim().replace(/^(\.\/|\/)/, '');
     const lineNum = parseInt(match[2], 10);
     const text = match[3].trim();
     if (filePath && !isNaN(lineNum) && text) {
@@ -428,10 +427,6 @@ async function deleteReaction(
   } catch (err) {
     core.warning(`Failed to delete reaction ${reactionId}: ${String(err)}`);
   }
-}
-
-function stripFindingsSection(message: string): string {
-  return message.replace(/##\s*Findings[\s\S]*?(?=\n##\s+|$)/i, '').trim();
 }
 
 async function markCommentFailed(
