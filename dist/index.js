@@ -40746,7 +40746,6 @@ async function run() {
         // Search for existing review comment or PR review with session ID if present
         let existingSessionId;
         let lastReviewedSha;
-        let isAlreadyCompleted = false;
         try {
             const comments = await octokit.rest.issues.listComments({
                 owner, repo, issue_number: prNumber,
@@ -40760,9 +40759,6 @@ async function run() {
                 const shaMatch = existingComment.body.match(/\(Commit:\s*`([a-f0-9]+)`\)/i);
                 if (shaMatch)
                     lastReviewedSha = shaMatch[1];
-                if (isReviewBodyComplete(existingComment.body)) {
-                    isAlreadyCompleted = true;
-                }
             }
             if (!existingSessionId) {
                 const reviews = await octokit.rest.pulls.listReviews({
@@ -40776,9 +40772,6 @@ async function run() {
                     const shaMatch = existingReview.body.match(/\(Commit:\s*`([a-f0-9]+)`\)/i);
                     if (shaMatch)
                         lastReviewedSha = shaMatch[1];
-                    if (isReviewBodyComplete(existingReview.body)) {
-                        isAlreadyCompleted = true;
-                    }
                 }
             }
         }
@@ -40789,7 +40782,6 @@ async function run() {
         let session;
         let expectedMinMessages = 1;
         const shortSha = headSha.slice(0, 7);
-        let skipReviewGeneration = false;
         if (existingSessionId) {
             info(`Resuming existing Jules session: ${existingSessionId}`);
             session = customJules.session(existingSessionId);
@@ -40808,19 +40800,13 @@ async function run() {
                 info(`Could not count existing history messages: ${String(e)}`);
             }
             if (lastReviewedSha === shortSha) {
-                if (isAlreadyCompleted) {
-                    info(`Session already reviewed commit ${shortSha}. Skipping generation.`);
-                    skipReviewGeneration = true;
+                info(`Resuming session on same commit ${shortSha} (last activity: ${lastActivityType || 'unknown'}).`);
+                // If the last activity was userMessaged, Jules hasn't replied yet — wait for next response.
+                if (lastActivityType === 'userMessaged') {
+                    expectedMinMessages = existingMsgCount + 1;
                 }
                 else {
-                    info(`Resuming session on same commit ${shortSha}.`);
-                    // If the last activity was userMessaged, Jules hasn't replied yet — wait for next response.
-                    if (lastActivityType === 'userMessaged') {
-                        expectedMinMessages = existingMsgCount + 1;
-                    }
-                    else {
-                        expectedMinMessages = Math.max(1, existingMsgCount);
-                    }
+                    expectedMinMessages = Math.max(1, existingMsgCount);
                 }
             }
             else {
@@ -40876,12 +40862,9 @@ VERDICT: approve (or comment or block)`;
             }
             await waitUntilSessionReady(session);
         }
-        let reviewMessage = '';
-        if (!skipReviewGeneration) {
-            reviewMessage = await pollForReview(session, timeoutMinutes * 60 * 1000, expectedMinMessages);
-            info(`Collected review (${reviewMessage.length} chars)`);
-        }
-        if (!reviewMessage && !skipReviewGeneration) {
+        const reviewMessage = await pollForReview(session, timeoutMinutes * 60 * 1000, expectedMinMessages);
+        info(`Collected review (${reviewMessage.length} chars)`);
+        if (!reviewMessage) {
             if (eyesReactionId)
                 await deleteReaction(octokit, owner, repo, prNumber, eyesReactionId);
             await markCommentFailed(octokit, owner, repo, prNumber, commentId, `Jules did not return a review within ${timeoutMinutes} minutes. Session: \`${session.id}\`. ` +
@@ -40892,66 +40875,56 @@ VERDICT: approve (or comment or block)`;
             return;
         }
         const verdict = parseVerdict(reviewMessage);
-        // Only process comments if we actually generated a new review
-        if (!skipReviewGeneration) {
-            // Parse and post line-level inline comments if present in the review output
-            let postedInline = false;
-            const inlineComments = parseInlineComments(reviewMessage);
-            if (inlineComments.length > 0) {
-                info(`Found ${inlineComments.length} inline line-level finding(s). Posting to PR...`);
-                try {
-                    await octokit.rest.pulls.createReview({
-                        owner, repo, pull_number: prNumber,
-                        commit_id: headSha,
-                        event: 'COMMENT',
-                        body: `${COMMENT_MARKER}\n🤖 **Jules Review** (Commit: \`${shortSha}\`)\n\n---\n_Session: \`${session.id}\`_`,
-                        comments: inlineComments.map(c => ({
-                            path: c.path,
-                            line: c.line,
-                            body: `🤖 **Jules Finding**: ${c.body}`
-                        }))
-                    });
-                    postedInline = true;
-                    // Update placeholder to indicate completion since inline comments were posted
-                    if (commentId) {
-                        const completedBody = `${COMMENT_MARKER}\n✅ **Review complete! See inline comments.** (Commit: \`${shortSha}\`)\n\n---\n_Session: \`${session.id}\`_`;
-                        await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: completedBody });
-                    }
-                }
-                catch (err) {
-                    warning(`Could not post line-level review comments: ${String(err)}`);
-                }
-            }
-            if (verdict === 'approve') {
-                // Add thumbsup reaction on clean approval
-                await addReaction(octokit, owner, repo, prNumber, '+1');
-            }
-            // Only post top-level comment if NO inline findings were posted (or if inline review failed)
-            if (!postedInline) {
-                const finalBody = `${COMMENT_MARKER}\n## 🤖 Jules Review (Commit: \`${shortSha}\`)\n\n${reviewMessage}\n\n---\n_Session: \`${session.id}\`_`;
+        // Parse and post line-level inline comments if present in the review output
+        let postedInline = false;
+        const inlineComments = parseInlineComments(reviewMessage);
+        if (inlineComments.length > 0) {
+            info(`Found ${inlineComments.length} inline line-level finding(s). Posting to PR...`);
+            try {
+                await octokit.rest.pulls.createReview({
+                    owner, repo, pull_number: prNumber,
+                    commit_id: headSha,
+                    event: 'COMMENT',
+                    body: `${COMMENT_MARKER}\n🤖 **Jules Review** (Commit: \`${shortSha}\`)\n\n---\n_Session: \`${session.id}\`_`,
+                    comments: inlineComments.map(c => ({
+                        path: c.path,
+                        line: c.line,
+                        body: `🤖 **Jules Finding**: ${c.body}`
+                    }))
+                });
+                postedInline = true;
+                // Update placeholder to indicate completion since inline comments were posted
                 if (commentId) {
-                    await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody });
+                    const completedBody = `${COMMENT_MARKER}\n✅ **Review complete! See inline comments.** (Commit: \`${shortSha}\`)\n\n---\n_Session: \`${session.id}\`_`;
+                    await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: completedBody });
                 }
-                else {
-                    let created = await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: finalBody });
-                    commentId = created.data.id;
-                }
+            }
+            catch (err) {
+                warning(`Could not post line-level review comments: ${String(err)}`);
             }
         }
-        // Always clean up eyes reaction and set final status (even when skipping)
+        if (verdict === 'approve') {
+            // Add thumbsup reaction on clean approval
+            await addReaction(octokit, owner, repo, prNumber, '+1');
+        }
+        // Only post top-level comment if NO inline findings were posted (or if inline review failed)
+        if (!postedInline) {
+            const finalBody = `${COMMENT_MARKER}\n## 🤖 Jules Review (Commit: \`${shortSha}\`)\n\n${reviewMessage}\n\n---\n_Session: \`${session.id}\`_`;
+            if (commentId) {
+                await octokit.rest.issues.updateComment({ owner, repo, comment_id: commentId, body: finalBody });
+            }
+            else {
+                let created = await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: finalBody });
+                commentId = created.data.id;
+            }
+        }
+        // Always clean up eyes reaction and set final status
         if (eyesReactionId) {
             await deleteReaction(octokit, owner, repo, prNumber, eyesReactionId);
         }
-        if (!skipReviewGeneration) {
-            const { state, description } = statusFromVerdict(verdict, failOn);
-            await setStatus(octokit, owner, repo, headSha, statusContext, state, description);
-            info(`Verdict: ${verdict}. Status check: ${state}.`);
-        }
-        else {
-            // When skipping, resolve pending status to success — the review result is already in the existing comment
-            await setStatus(octokit, owner, repo, headSha, statusContext, 'success', 'Review already completed for this commit');
-            info(`Review already fully completed for commit ${shortSha}.`);
-        }
+        const { state, description } = statusFromVerdict(verdict, failOn);
+        await setStatus(octokit, owner, repo, headSha, statusContext, state, description);
+        info(`Verdict: ${verdict}. Status check: ${state}.`);
     }
     catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -41078,16 +41051,6 @@ function wrapPermissionError(err, needed, op) {
     }
     return err instanceof Error ? err : new Error(msg);
 }
-function isReviewBodyComplete(body) {
-    if (body.includes('✅ **Review complete! See inline comments.**'))
-        return true;
-    if (body.includes('## 🤖 Jules Review') && hasFinalVerdict(body))
-        return true;
-    return false;
-}
-function hasFinalVerdict(message) {
-    return /VERDICT:\s*(approve|comment|block)/i.test(message) || /\[BLOCKING\]/i.test(message);
-}
 async function pollForReview(session, timeoutMs, expectedMinMessages = 1) {
     const deadline = Date.now() + timeoutMs;
     let attempt = 0;
@@ -41097,21 +41060,19 @@ async function pollForReview(session, timeoutMs, expectedMinMessages = 1) {
             await session.hydrate();
             let messageCount = 0;
             let lastMessage = '';
-            let lastVerdictMessage = '';
+            let lastActivityType = '';
             for await (const a of session.history()) {
+                lastActivityType = a.type;
                 if (a.type === 'agentMessaged') {
                     messageCount++;
                     lastMessage = a.message || '';
-                    if (hasFinalVerdict(lastMessage)) {
-                        lastVerdictMessage = lastMessage;
-                    }
                 }
             }
-            if (lastVerdictMessage && messageCount >= expectedMinMessages) {
-                info(`Got final review with verdict (${messageCount}/${expectedMinMessages}) on attempt ${attempt}.`);
-                return lastVerdictMessage;
+            if (lastMessage && messageCount >= expectedMinMessages && lastActivityType !== 'userMessaged') {
+                info(`Got latest response from Jules (${messageCount}/${expectedMinMessages}) on attempt ${attempt}.`);
+                return lastMessage;
             }
-            info(`Waiting for final review with VERDICT (have ${messageCount}, need ${expectedMinMessages}, hasVerdict: ${Boolean(lastVerdictMessage)}) (attempt ${attempt})…`);
+            info(`Waiting for Jules response (have ${messageCount}, need ${expectedMinMessages}, lastActivity: ${lastActivityType || 'unknown'}) (attempt ${attempt})…`);
         }
         catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -41164,8 +41125,20 @@ function parseVerdict(message) {
     const match = message.match(/VERDICT:\s*(approve|comment|block)/i);
     if (match)
         return match[1].toLowerCase();
+    const altMatch = message.match(/\b(?:verdict|conclusion|status)\s*:\s*(approve[d]?|comment|block(?:ed)?|changes requested)\b/i);
+    if (altMatch) {
+        const val = altMatch[1].toLowerCase();
+        if (val.startsWith('approve'))
+            return 'approve';
+        if (val.startsWith('block') || val.includes('changes'))
+            return 'block';
+        return 'comment';
+    }
     if (/\[BLOCKING\]/.test(message))
         return 'block';
+    if (/\b(?:LGTM|looks good to me|approved|all issues (?:are|have been) resolved|changes look good)\b/i.test(message)) {
+        return 'approve';
+    }
     return 'comment';
 }
 function statusFromVerdict(verdict, failOn) {
